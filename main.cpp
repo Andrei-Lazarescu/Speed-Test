@@ -4,12 +4,13 @@
 #include <chrono>
 #include <thread>
 #include <cstring>
+#include <cstdio> 
 
-// Directiva pentru compatibilitate Cross-Platform (Windows vs Linux/macOS)
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib") // Necesar pentru compilatorul MSVC, dar pe MinGW vom adauga un flag separat
+#pragma comment(lib, "ws2_32.lib") 
 #else
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -19,11 +20,11 @@
 #define SOCKET_ERROR (-1)
 #endif
 
-const int PORT = 5201;             // Portul default pentru iperf3
-const int BUFFER_SIZE = 65536;     // 64 KB per pachet trimis/citit
-const int TEST_DURATION_SEC = 10;  // Durata default a testului
+const int PORT = 5201;            
+const int BUFFER_SIZE = 65536;     // 64 KB
+const int TEST_DURATION_SEC = 10;  
 
-// --- Functii Utilitare Cross-Platform ---
+
 void initSockets() {
 #ifdef _WIN32
     WSADATA wsaData;
@@ -48,7 +49,7 @@ void closeSocket(SOCKET s) {
 #endif
 }
 
-// --- Modul SERVER ---
+
 void runServer() {
     initSockets();
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -57,7 +58,7 @@ void runServer() {
         return;
     }
 
-    // Permite reutilizarea portului imediat dupa inchidere
+    
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
@@ -105,7 +106,7 @@ void runServer() {
 
         while (true) {
             int bytes_read = recv(client_socket, buffer.data(), BUFFER_SIZE, 0);
-            if (bytes_read <= 0) break; // Clientul s-a deconectat
+            if (bytes_read <= 0) break; 
 
             total_bytes += bytes_read;
             interval_bytes += bytes_read;
@@ -130,7 +131,7 @@ void runServer() {
     cleanupSockets();
 }
 
-// --- Modul CLIENT ---
+
 void runClient(const std::string& server_ip) {
     initSockets();
     SOCKET client_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -154,7 +155,7 @@ void runClient(const std::string& server_ip) {
 
     std::cout << "-----------------------------------------------------------\n";
 
-    // Generam date 'dummy' pentru a inunda reteaua
+    
     std::vector<char> buffer(BUFFER_SIZE, 'A');
     uint64_t total_bytes = 0;
     uint64_t interval_bytes = 0;
@@ -167,7 +168,7 @@ void runClient(const std::string& server_ip) {
         std::chrono::duration<double> total_elapsed = current_time - start_time;
 
         if (total_elapsed.count() >= TEST_DURATION_SEC) {
-            break; // Oprim testul dupa cele 10 secunde
+            break; // 10 secunde
         }
 
         int bytes_sent = send(client_socket, buffer.data(), BUFFER_SIZE, 0);
@@ -200,12 +201,85 @@ void runClient(const std::string& server_ip) {
     cleanupSockets();
 }
 
+
+void runDiskTest() {
+    std::cout << "-----------------------------------------------------------\n";
+    std::cout << "Incepere test Disk I/O (Scriere secventiala timp de " << TEST_DURATION_SEC << "s)...\n";
+    std::cout << "-----------------------------------------------------------\n";
+
+    const size_t DISK_BUFFER_SIZE = 1024 * 1024; 
+    std::vector<char> buffer(DISK_BUFFER_SIZE, 'B'); 
+    const std::string filename = "speedtest_dummy_file.tmp";
+
+   
+    FILE* file = fopen(filename.c_str(), "wb");
+    if (!file) {
+        std::cerr << "Eroare la crearea fisierului de test pe disk. Asigura-te ca ai permisiuni de scriere.\n";
+        return;
+    }
+
+    uint64_t total_bytes = 0;
+    uint64_t interval_bytes = 0;
+
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_report_time = start_time;
+
+    while (true) {
+        auto current_time = std::chrono::steady_clock::now();
+        std::chrono::duration<double> total_elapsed = current_time - start_time;
+
+        if (total_elapsed.count() >= TEST_DURATION_SEC) {
+            break; 
+        }
+
+        
+        size_t bytes_written = fwrite(buffer.data(), 1, DISK_BUFFER_SIZE, file);
+        if (bytes_written != DISK_BUFFER_SIZE) {
+            std::cerr << "Eroare la scrierea datelor pe disk.\n";
+            break;
+        }
+
+        total_bytes += bytes_written;
+        interval_bytes += bytes_written;
+
+        
+        std::chrono::duration<double> interval_elapsed = current_time - last_report_time;
+        if (interval_elapsed.count() >= 1.0) {
+            
+            double mb_per_sec = (interval_bytes) / (1024.0 * 1024.0 * interval_elapsed.count());
+            std::cout << "[DISK] Viteza scriere: " << mb_per_sec << " MB/s\n";
+            interval_bytes = 0;
+            last_report_time = current_time;
+        }
+    }
+
+    fclose(file);
+
+    std::chrono::duration<double> final_elapsed = std::chrono::steady_clock::now() - start_time;
+    double final_mb_per_sec = (total_bytes) / (1024.0 * 1024.0 * final_elapsed.count());
+
+    std::cout << "-----------------------------------------------------------\n";
+    std::cout << "Test Disk finalizat.\n";
+    std::cout << "Total date scrise pe disk: " << total_bytes / (1024 * 1024) << " MB\n";
+    std::cout << "Viteza medie de Disk I/O: " << final_mb_per_sec << " MB/s\n";
+
+    
+    if (std::remove(filename.c_str()) != 0) {
+        std::cerr << "Avertisment: Nu s-a putut sterge fisierul temporar " << filename << "\n";
+    }
+    else {
+        std::cout << "Fisierul temporar a fost sters cu succes.\n";
+    }
+    std::cout << "-----------------------------------------------------------\n";
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Utilizare incorecta.\n\n";
         std::cerr << "Comenzi disponibile:\n";
-        std::cerr << "  Mod Server: " << argv[0] << " -s\n";
-        std::cerr << "  Mod Client: " << argv[0] << " -c <IP_SERVER>\n";
+        std::cerr << "  Mod Server (Retea): " << argv[0] << " -s\n";
+        std::cerr << "  Mod Client (Retea): " << argv[0] << " -c <IP_SERVER>\n";
+        std::cerr << "  Mod Test Disk I/O:  " << argv[0] << " -d\n";
         return 1;
     }
 
@@ -218,8 +292,11 @@ int main(int argc, char* argv[]) {
         std::string server_ip = argv[2];
         runClient(server_ip);
     }
+    else if (mode == "-d") {
+        runDiskTest();
+    }
     else {
-        std::cerr << "Argumente invalide. Vezi utilizarea.\n";
+        std::cerr << "Argumente invalide. Vezi Commands.md .\n";
     }
 
     return 0;

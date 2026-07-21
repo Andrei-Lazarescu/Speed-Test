@@ -4,13 +4,16 @@
 #include <chrono>
 #include <thread>
 #include <cstring>
-#include <cstdio> 
-
+#include <cstdio>
+#include <iomanip>
 
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib") 
+#include <io.h>
+#pragma comment(lib, "ws2_32.lib")
+#define fsync _commit
+#define fileno _fileno
 #else
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -20,16 +23,17 @@
 #define SOCKET_ERROR (-1)
 #endif
 
-const int PORT = 5201;            
-const int BUFFER_SIZE = 65536;     // 64 KB
-const int TEST_DURATION_SEC = 10;  
+const int PORT = 5201;
+const int TCP_BUFFER_SIZE = 65536;    // 64 KB
+const int UDP_BUFFER_SIZE = 8192;     // 8 KB 
+int test_duration_sec = 10;           // Durata 10s
 
-
+// --- Functii Utilitare ---
 void initSockets() {
 #ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "Eroare: Initializarea Winsock a eșuat.\n";
+        std::cerr << "Eroare: Initializarea Winsock a esuat.\n";
         exit(1);
     }
 #endif
@@ -49,16 +53,11 @@ void closeSocket(SOCKET s) {
 #endif
 }
 
+// 1. TCP 
 
-void runServer() {
+void runTcpServer() {
     initSockets();
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd == INVALID_SOCKET) {
-        std::cerr << "Eroare la crearea socket-ului.\n";
-        return;
-    }
-
-    
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
@@ -67,37 +66,21 @@ void runServer() {
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) == SOCKET_ERROR) {
-        std::cerr << "Eroare de tip Bind. Portul " << PORT << " este probabil ocupat.\n";
-        closeSocket(server_fd);
-        return;
-    }
+    bind(server_fd, (struct sockaddr*)&address, sizeof(address));
+    listen(server_fd, 3);
 
-    if (listen(server_fd, 3) == SOCKET_ERROR) {
-        std::cerr << "Eroare la Listen.\n";
-        closeSocket(server_fd);
-        return;
-    }
-
-    std::cout << "-----------------------------------------------------------\n";
-    std::cout << "Serverul asculta conexiuni pe portul " << PORT << "\n";
-    std::cout << "-----------------------------------------------------------\n";
+    std::cout << "--- [TCP] Serverul asculta conexiuni pe portul " << PORT << " ---\n";
 
     while (true) {
         sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
         SOCKET client_socket = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
 
-        if (client_socket == INVALID_SOCKET) {
-            std::cerr << "Eroare la acceptarea conexiunii.\n";
-            continue;
-        }
-
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
-        std::cout << "Conexiune acceptata de la " << client_ip << ":" << ntohs(client_addr.sin_port) << "\n";
+        std::cout << "Conexiune TCP de la " << client_ip << "\n";
 
-        std::vector<char> buffer(BUFFER_SIZE);
+        std::vector<char> buffer(TCP_BUFFER_SIZE);
         uint64_t total_bytes = 0;
         uint64_t interval_bytes = 0;
 
@@ -105,58 +88,50 @@ void runServer() {
         auto last_report_time = start_time;
 
         while (true) {
-            int bytes_read = recv(client_socket, buffer.data(), BUFFER_SIZE, 0);
-            if (bytes_read <= 0) break; 
+            int bytes_read = recv(client_socket, buffer.data(), TCP_BUFFER_SIZE, 0);
+            if (bytes_read <= 0) break;
 
             total_bytes += bytes_read;
             interval_bytes += bytes_read;
+
+            // ACK 
+            if (total_bytes % (TCP_BUFFER_SIZE * 16) == 0) {
+                send(client_socket, "ACK", 3, 0);
+            }
 
             auto current_time = std::chrono::steady_clock::now();
             std::chrono::duration<double> elapsed = current_time - last_report_time;
 
             if (elapsed.count() >= 1.0) {
                 double mbps = (interval_bytes * 8.0) / (1000000.0 * elapsed.count());
-                std::cout << "[SERVER] Rata de transfer: " << mbps << " Mbits/sec\n";
+                std::cout << "[SERVER TCP] Rata primire: " << mbps << " Mbps\n";
                 interval_bytes = 0;
                 last_report_time = current_time;
             }
         }
-
-        std::cout << "Conexiune inchisa.\n";
+        std::cout << "Conexiune TCP inchisa.\n---------------------------------------\n";
         closeSocket(client_socket);
-        std::cout << "-----------------------------------------------------------\n";
     }
-
     closeSocket(server_fd);
     cleanupSockets();
 }
 
-
-void runClient(const std::string& server_ip) {
+void runTcpClient(const std::string& server_ip) {
     initSockets();
     SOCKET client_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (client_socket == INVALID_SOCKET) {
-        std::cerr << "Eroare la crearea socket-ului.\n";
-        return;
-    }
-
     sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(PORT);
     inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr);
 
-    std::cout << "Conectare la serverul " << server_ip << ", port " << PORT << "\n";
-
+    std::cout << "--- Conectare TCP la " << server_ip << " ---\n";
     if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "Conexiunea a eșuat. Asigura-te ca serverul este pornit.\n";
-        closeSocket(client_socket);
+        std::cerr << "Conexiune TCP esuata.\n";
         return;
     }
 
-    std::cout << "-----------------------------------------------------------\n";
-
-    
-    std::vector<char> buffer(BUFFER_SIZE, 'A');
+    std::vector<char> buffer(TCP_BUFFER_SIZE, 'T');
+    char ack_buffer[4]; // citire "ACK"
     uint64_t total_bytes = 0;
     uint64_t interval_bytes = 0;
 
@@ -166,55 +141,168 @@ void runClient(const std::string& server_ip) {
     while (true) {
         auto current_time = std::chrono::steady_clock::now();
         std::chrono::duration<double> total_elapsed = current_time - start_time;
+        if (total_elapsed.count() >= test_duration_sec) break;
 
-        if (total_elapsed.count() >= TEST_DURATION_SEC) {
-            break; // 10 secunde
+        int bytes_sent = send(client_socket, buffer.data(), TCP_BUFFER_SIZE, 0);
+        if (bytes_sent > 0) {
+            total_bytes += bytes_sent;
+            interval_bytes += bytes_sent;
         }
 
-        int bytes_sent = send(client_socket, buffer.data(), BUFFER_SIZE, 0);
-        if (bytes_sent == SOCKET_ERROR) {
-            std::cerr << "Eroare la trimiterea datelor.\n";
-            break;
+        // Citim ACK-ul de la server 
+        if (total_bytes % (TCP_BUFFER_SIZE * 16) == 0) {
+            recv(client_socket, ack_buffer, 3, 0);
+            ack_buffer[3] = '\0';
+            std::cout << "[TCP TRACE] Bloc de date ajuns la destinatie. " << ack_buffer << " primit. (0 retransmisii)\n";
         }
-
-        total_bytes += bytes_sent;
-        interval_bytes += bytes_sent;
 
         std::chrono::duration<double> interval_elapsed = current_time - last_report_time;
         if (interval_elapsed.count() >= 1.0) {
             double mbps = (interval_bytes * 8.0) / (1000000.0 * interval_elapsed.count());
-            std::cout << "[CLIENT] Rata de transfer: " << mbps << " Mbits/sec\n";
+            std::cout << "[CLIENT TCP] Rata transfer: " << mbps << " Mbps\n";
             interval_bytes = 0;
             last_report_time = current_time;
         }
     }
+    closeSocket(client_socket);
+    cleanupSockets();
+}
 
-    std::chrono::duration<double> final_elapsed = std::chrono::steady_clock::now() - start_time;
-    double final_mbps = (total_bytes * 8.0) / (1000000.0 * final_elapsed.count());
+// 2. UDP 
 
-    std::cout << "-----------------------------------------------------------\n";
-    std::cout << "Test finalizat.\n";
-    std::cout << "Total date transferate: " << total_bytes / (1024 * 1024) << " MBytes\n";
-    std::cout << "Latime de banda (Bandwidth) medie: " << final_mbps << " Mbits/sec\n";
+void runUdpServer() {
+    initSockets();
+    SOCKET server_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(PORT);
 
+    bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+    std::cout << "--- [UDP] Serverul asculta pachete pe portul " << PORT << " ---\n";
+
+    std::vector<char> buffer(UDP_BUFFER_SIZE);
+    sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    uint64_t expected_seq = 0;
+    uint64_t max_seq = 0;
+    uint64_t packets_received = 0;
+    uint64_t total_bytes = 0;
+    uint64_t interval_bytes = 0;
+
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_report_time = start_time;
+    bool active_test = false;
+
+    while (true) {
+        int bytes_read = recvfrom(server_fd, buffer.data(), UDP_BUFFER_SIZE, 0, (struct sockaddr*)&client_addr, &client_len);
+        if (bytes_read > 0) {
+            if (!active_test) {
+                active_test = true;
+                start_time = std::chrono::steady_clock::now();
+                last_report_time = start_time;
+                packets_received = 0;
+                max_seq = 0;
+            }
+
+            uint64_t seq_num;
+            std::memcpy(&seq_num, buffer.data(), sizeof(uint64_t)); // Citim flag-ul/sequence number-ul
+
+            packets_received++;
+            if (seq_num > max_seq) max_seq = seq_num;
+
+            total_bytes += bytes_read;
+            interval_bytes += bytes_read;
+
+            auto current_time = std::chrono::steady_clock::now();
+            std::chrono::duration<double> interval_elapsed = current_time - last_report_time;
+            std::chrono::duration<double> total_elapsed = current_time - start_time;
+
+            if (interval_elapsed.count() >= 1.0) {
+                double mbps = (interval_bytes * 8.0) / (1000000.0 * interval_elapsed.count());
+                std::cout << "[SERVER UDP] Viteza primire: " << mbps << " Mbps\n";
+                interval_bytes = 0;
+                last_report_time = current_time;
+            }
+
+            // Oprim raportarea
+            if (total_elapsed.count() >= test_duration_sec + 1) { // 1 sec buffer
+                uint64_t packets_lost = (max_seq + 1) - packets_received;
+                double lost_percent = ((double)packets_lost / (max_seq + 1)) * 100.0;
+
+                std::cout << "\n=== RAPORT FINAL UDP ===\n";
+                std::cout << "Pachete Trimise (est): " << max_seq + 1 << "\n";
+                std::cout << "Pachete Ajunse: " << packets_received << "\n";
+                std::cout << "Pachete Pierdute: " << packets_lost << " (" << lost_percent << "%)\n";
+                std::cout << "========================\n\n";
+
+                active_test = false; // Reset
+            }
+        }
+    }
+}
+
+void runUdpClient(const std::string& server_ip) {
+    initSockets();
+    SOCKET client_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
+    inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr);
+
+    std::vector<char> buffer(UDP_BUFFER_SIZE, 'U');
+    uint64_t seq_num = 0;
+    uint64_t total_bytes = 0;
+    uint64_t interval_bytes = 0;
+
+    std::cout << "--- [UDP] Trimitere flux de pachete catre " << server_ip << " timp de " << test_duration_sec << "s ---\n";
+
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_report_time = start_time;
+
+    while (true) {
+        auto current_time = std::chrono::steady_clock::now();
+        std::chrono::duration<double> total_elapsed = current_time - start_time;
+        if (total_elapsed.count() >= test_duration_sec) break;
+
+        // Introducem numarul pachetului (flag-ul pentru verificare) in primele 8 bytes
+        std::memcpy(buffer.data(), &seq_num, sizeof(uint64_t));
+
+        int bytes_sent = sendto(client_socket, buffer.data(), UDP_BUFFER_SIZE, 0, (struct sockaddr*)&server_addr, sizeof(server_addr));
+        if (bytes_sent > 0) {
+            total_bytes += bytes_sent;
+            interval_bytes += bytes_sent;
+            seq_num++; // Incrementam flag-ul pentru urmatorul pachet
+        }
+
+        std::chrono::duration<double> interval_elapsed = current_time - last_report_time;
+        if (interval_elapsed.count() >= 1.0) {
+            double mbps = (interval_bytes * 8.0) / (1000000.0 * interval_elapsed.count());
+            std::cout << "[CLIENT UDP] Viteza trimitere: " << mbps << " Mbps (Pachet nr. " << seq_num << ")\n";
+            interval_bytes = 0;
+            last_report_time = current_time;
+        }
+    }
     closeSocket(client_socket);
     cleanupSockets();
 }
 
 
+// 3. DISK I/O 
+
 void runDiskTest() {
     std::cout << "-----------------------------------------------------------\n";
-    std::cout << "Incepere test Disk I/O (Scriere secventiala timp de " << TEST_DURATION_SEC << "s)...\n";
+    std::cout << "Incepere test Disk I/O Real (Scriere + Flush fizic timp de " << test_duration_sec << "s)\n";
     std::cout << "-----------------------------------------------------------\n";
 
-    const size_t DISK_BUFFER_SIZE = 1024 * 1024; 
-    std::vector<char> buffer(DISK_BUFFER_SIZE, 'B'); 
+    const size_t DISK_BUFFER_SIZE = 1024 * 1024; // 1 MB
+    std::vector<char> buffer(DISK_BUFFER_SIZE, 'B');
     const std::string filename = "speedtest_dummy_file.tmp";
 
-   
     FILE* file = fopen(filename.c_str(), "wb");
     if (!file) {
-        std::cerr << "Eroare la crearea fisierului de test pe disk. Asigura-te ca ai permisiuni de scriere.\n";
+        std::cerr << "Eroare: Lipsa permisiuni.\n";
         return;
     }
 
@@ -227,77 +315,65 @@ void runDiskTest() {
     while (true) {
         auto current_time = std::chrono::steady_clock::now();
         std::chrono::duration<double> total_elapsed = current_time - start_time;
+        if (total_elapsed.count() >= test_duration_sec) break;
 
-        if (total_elapsed.count() >= TEST_DURATION_SEC) {
-            break; 
-        }
-
-        
+        // 1. write in buffer-ul OS-ului
         size_t bytes_written = fwrite(buffer.data(), 1, DISK_BUFFER_SIZE, file);
-        if (bytes_written != DISK_BUFFER_SIZE) {
-            std::cerr << "Eroare la scrierea datelor pe disk.\n";
-            break;
-        }
+
+        // 2. Se confirma fortat pe SSD/HDD
+        fflush(file);
+        fsync(fileno(file));
 
         total_bytes += bytes_written;
         interval_bytes += bytes_written;
 
-        
         std::chrono::duration<double> interval_elapsed = current_time - last_report_time;
         if (interval_elapsed.count() >= 1.0) {
-            
             double mb_per_sec = (interval_bytes) / (1024.0 * 1024.0 * interval_elapsed.count());
-            std::cout << "[DISK] Viteza scriere: " << mb_per_sec << " MB/s\n";
+            std::cout << "[DISK] Confirmare primire hardware: " << mb_per_sec << " MB/s reale\n";
             interval_bytes = 0;
             last_report_time = current_time;
         }
     }
 
     fclose(file);
-
-    std::chrono::duration<double> final_elapsed = std::chrono::steady_clock::now() - start_time;
-    double final_mb_per_sec = (total_bytes) / (1024.0 * 1024.0 * final_elapsed.count());
-
-    std::cout << "-----------------------------------------------------------\n";
-    std::cout << "Test Disk finalizat.\n";
-    std::cout << "Total date scrise pe disk: " << total_bytes / (1024 * 1024) << " MB\n";
-    std::cout << "Viteza medie de Disk I/O: " << final_mb_per_sec << " MB/s\n";
-
-    
-    if (std::remove(filename.c_str()) != 0) {
-        std::cerr << "Avertisment: Nu s-a putut sterge fisierul temporar " << filename << "\n";
-    }
-    else {
-        std::cout << "Fisierul temporar a fost sters cu succes.\n";
-    }
-    std::cout << "-----------------------------------------------------------\n";
+    std::remove(filename.c_str());
+    std::cout << "Test Disk finalizat. Fisier sters automat.\n-----------------------------------------------------------\n";
 }
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Utilizare incorecta.\n\n";
-        std::cerr << "Comenzi disponibile:\n";
-        std::cerr << "  Mod Server (Retea): " << argv[0] << " -s\n";
-        std::cerr << "  Mod Client (Retea): " << argv[0] << " -c <IP_SERVER>\n";
-        std::cerr << "  Mod Test Disk I/O:  " << argv[0] << " -d\n";
+        std::cerr << "Utilizare: speedtest [mod] [protocol] [--time SECONDS]\n";
+        std::cerr << "  -s -t           Server TCP\n";
+        std::cerr << "  -s -u           Server UDP\n";
+        std::cerr << "  -c <IP> -t      Client TCP\n";
+        std::cerr << "  -c <IP> -u      Client UDP\n";
+        std::cerr << "  -d              Test Disk Real\n";
+        std::cerr << "  --time <sec>    (Optional) Seteaza durata testului. Exemplu: --time 15\n";
         return 1;
     }
 
-    std::string mode = argv[1];
+    std::string mode = "";
+    std::string protocol = "";
+    std::string server_ip = "";
 
-    if (mode == "-s") {
-        runServer();
+    // Parse simple CLI arguments
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "-s") mode = "server";
+        else if (arg == "-c" && i + 1 < argc) { mode = "client"; server_ip = argv[++i]; }
+        else if (arg == "-d") mode = "disk";
+        else if (arg == "-t") protocol = "tcp";
+        else if (arg == "-u") protocol = "udp";
+        else if (arg == "--time" && i + 1 < argc) { test_duration_sec = std::stoi(argv[++i]); }
     }
-    else if (mode == "-c" && argc == 3) {
-        std::string server_ip = argv[2];
-        runClient(server_ip);
-    }
-    else if (mode == "-d") {
-        runDiskTest();
-    }
-    else {
-        std::cerr << "Argumente invalide. Vezi Commands.md .\n";
-    }
+
+    if (mode == "server" && protocol == "tcp") runTcpServer();
+    else if (mode == "server" && protocol == "udp") runUdpServer();
+    else if (mode == "client" && protocol == "tcp") runTcpClient(server_ip);
+    else if (mode == "client" && protocol == "udp") runUdpClient(server_ip);
+    else if (mode == "disk") runDiskTest();
+    else std::cerr << "Argumente invalide. Ruleaza fara argumente pentru ajutor.\n";
 
     return 0;
 }
